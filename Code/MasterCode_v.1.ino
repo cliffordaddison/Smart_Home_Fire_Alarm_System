@@ -96,6 +96,7 @@ void loop() {
 
 String statusText(int i) {
   if(rooms[i].fire) return "FIRE!";
+  if(rooms[i].light > 250) return "BRIGHT!";
   if(rooms[i].temp > 50) return "HOT!";
   if(rooms[i].gas > 650) return "SMOKE!";
   if(rooms[i].motion) return "MOTION";
