@@ -1,87 +1,103 @@
 #include <Wire.h>
 #include <Adafruit_LiquidCrystal.h>
-Adafruit_LiquidCrystal lcd_1(0);
-Adafruit_LiquidCrystal lcd_2(1);
 
-const int timePotPin = A0; // Potentiometer connected here
+#define SLAVE_COUNT 4
+#define ALERT_DURATION 4000
+
+Adafruit_LiquidCrystal lcdA(0x26);
+Adafruit_LiquidCrystal lcdB(0x27);
+
+struct RoomData {
+  int gas;
+  float temp;
+  int light;
+  bool motion;
+  bool fire;
+  unsigned long lastAlert;
+};
+
+RoomData rooms[SLAVE_COUNT];
 
 void setup() {
-  
-  lcd_1.begin(16,2);
-  lcd_2.begin(16,2);
-
-  lcd_1.setCursor(0, 0);
-  lcd_2.setCursor(0, 0);
-  
-  Wire.begin(); // Start as I2C master
+  Wire.begin();
   Serial.begin(9600);
+
+  lcdA.begin(16, 2);
+  lcdB.begin(16, 2);
+  lcdA.print("System Ready");
+  lcdB.print("System Ready");
+  delay(2000);
 }
 
 void loop() {
-  int potValue = analogRead(timePotPin);
-  String command;
+  bool anyFire = false;
+  int fireRoom = -1;
+  int motionRoom = -1;
 
-  if (potValue <= 400) {
-    command = "NORMAL";  // Daytime mode
-  } else if (potValue <= 700) {
-    command = "DIM";     // After 9 PM
-  } else {
-    command = "OFF";     // After 11 PM
-  }
-  lcd_1.setCursor(0, 0);
-  //lcd_1.print(command);
-  lcd_2.setCursor(0, 0);
-  // Send command to all room Arduinos with addresses 0x01 to 0x04
-  for (byte addr = 0x01; addr <= 0x04; addr++) {
-    sendCommand(addr, command);
-  }
-  
-  // Receive command from all room Arduinos with addresses 0x01 to 0x04
-  for (byte addr = 0x01; addr <= 0x04; addr++) {
-  	String req_data = requestCommand(addr);
-  	Serial.print("Response from ");
-  	Serial.print(addr);
-	Serial.print(": ");
-	Serial.println(req_data);
-    if(addr == 0x01){
-    	lcd_1.print(req_data);
-    }else if(addr == 0x02){
-      lcd_1.setCursor(0, 1);
-      lcd_1.print(req_data);
-    }else if(addr == 0x03){
-    	lcd_2.print(req_data);
-    }else if(addr == 0x04){
-      lcd_2.setCursor(0, 1);
-      lcd_2.print(req_data);
+  for (int i = 0; i < SLAVE_COUNT; i++) {
+    if(Wire.requestFrom(i+1, 9) == 9) {
+      rooms[i].gas = Wire.read() | (Wire.read() << 8);
+      byte* tempBytes = (byte*)&rooms[i].temp;
+      for(int j=0; j<4; j++) tempBytes[j] = Wire.read();
+      rooms[i].light = Wire.read() | (Wire.read() << 8);
+      rooms[i].motion = Wire.read();
+      
+      bool smoke = rooms[i].gas > 650;
+      bool highTemp = rooms[i].temp > 50;
+      rooms[i].fire = (smoke && highTemp) || (rooms[i].motion && highTemp);
+
+      if(rooms[i].fire) fireRoom = i+1;
+      else if(rooms[i].motion) motionRoom = i+1;
     }
-
+    delay(10);
   }
 
-  Serial.print("Potentiometer: ");
-  Serial.print(potValue);
-  Serial.print(" | Mode: ");
-  Serial.println(command);
-
-  //delay(100);  // Update every 0.1 seconds
-}
-
-
-//To send commands to All Slaves
-void sendCommand(byte address, String cmd) {
-  Wire.beginTransmission(address);
-  Wire.write(cmd.c_str());
-  Wire.endTransmission();
-}
-
-//To receive commands from All Slaves
-String requestCommand(byte address) {
-  Wire.requestFrom(address,29); // Request up to 20 bytes
-  String response = "";
-  while (Wire.available()) {
-    char c = Wire.read();
-    if (isPrintable(c)) {  // Skip weird chars
-    	response += c;
-  	}
+  for(int i=1; i<=SLAVE_COUNT; i++) {
+    Wire.beginTransmission(i);
+    Wire.write(fireRoom > 0 ? 1 : 2);
+    Wire.endTransmission();
   }
-  return response;
+
+  if(fireRoom > 0) {
+    lcdA.clear(); lcdB.clear();
+    lcdA.print("Fire Room " + String(fireRoom));
+    lcdA.setCursor(0,1); lcdA.print("EVACUATE NOW!");
+    lcdB.print("Fire Room " + String(fireRoom));
+    lcdB.setCursor(0,1); lcdB.print("EVACUATE NOW!");
+    Serial.print(">>>>>>>>>>>>>>>>>>>>>>> FIRE ROOM " + String(fireRoom) + " <<<<<<<<<<<<<<<<<<<<<<<\n");
+  } 
+  else if(motionRoom > 0) {
+    lcdA.clear(); lcdB.clear();
+    lcdA.print("Motion Room " + String(motionRoom));
+    lcdA.setCursor(0,1); lcdA.print("Detected");
+    lcdB.print("Motion Room " + String(motionRoom));
+    lcdB.setCursor(0,1); lcdB.print("Detected");
+    Serial.print(">>>>>>>>>>>>>>>>>>>>> MOTION ROOM " + String(motionRoom) + " <<<<<<<<<<<<<<<<<<<<<\n");
+  } 
+  else {
+    lcdA.clear(); lcdB.clear();
+    lcdA.print("R1:" + statusText(0));
+    lcdA.setCursor(0,1); lcdA.print("R2:" + statusText(1));
+    lcdB.print("R3:" + statusText(2));
+    lcdB.setCursor(0,1); lcdB.print("R4:" + statusText(3));
+    Serial.print("======================= READINGS =======================\n");
+  }
+
+  for(int i=0; i<SLAVE_COUNT; i++) {
+    Serial.print("Room "); Serial.print(i+1); Serial.print(" | "); 
+    Serial.print(" Gas:"); Serial.print(rooms[i].gas); Serial.print(" | "); 
+    Serial.print(" Temp:"); Serial.print(rooms[i].temp,1); Serial.print(" | "); 
+    Serial.print(" Light:"); Serial.print(rooms[i].light); Serial.print(" | "); 
+    Serial.print(" Motion:"); Serial.println(rooms[i].motion ? "YES" : "NO");
+    }
+  
+  delay(250);
+}
+
+String statusText(int i) {
+  if(rooms[i].fire) return "FIRE!";
+  if(rooms[i].temp > 50) return "HOT!";
+  if(rooms[i].gas > 650) return "SMOKE!";
+  if(rooms[i].motion) return "MOTION";
+  return "Normal";
 }
